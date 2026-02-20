@@ -293,7 +293,7 @@ def format_events_for_week(events, start_date, end_date, period="неделю"):
 
     return "\n".join(lines)
 
-# ---------- Планировщик рассылки ----------
+# ---------- Планировщик рассылкиы ----------
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 async def daily_mailing():
