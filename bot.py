@@ -17,14 +17,15 @@ from apscheduler.triggers.cron import CronTrigger
 import pandas as pd
 from dotenv import load_dotenv
 
+import database as db
+from database import DB_NAME
+
 # Для вебхуков
 import uvicorn
 from starlette.applications import Starlette
 from starlette.responses import Response, PlainTextResponse
 from starlette.routing import Route
 from starlette.requests import Request
-
-import database as db
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -33,11 +34,22 @@ TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 db.init_db()
+
+# ---------- Вспомогательные функции ----------
+def get_russian_weekday(dt: date) -> str:
+    """Возвращает краткое название дня недели по-русски."""
+    weekdays = {
+        0: "пн", 1: "вт", 2: "ср", 3: "чт", 4: "пт", 5: "сб", 6: "вс"
+    }
+    return weekdays[dt.weekday()]
+
+def format_date_with_weekday(dt: date) -> str:
+    """Форматирует дату как 'дд.мм (день)' и оборачивает в жирный текст."""
+    return f"<b>{dt.strftime('%d.%m')} ({get_russian_weekday(dt)})</b>"
 
 # ---------- Клавиатура ----------
 def get_main_keyboard():
@@ -66,8 +78,30 @@ async def cmd_start(message: Message):
 async def subscribe(message: Message):
     user_id = message.from_user.id
     username = message.from_user.username
+
+    is_new = not db.user_exists(user_id)
     db.add_user(user_id, username)
+
+    if is_new:
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    f"🎉 **Новый подписчик!**\n"
+                    f"Пользователь: {username or 'нет юзернейма'}\n"
+                    f"ID: {user_id}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logging.error(f"Не удалось уведомить админа {admin_id}: {e}")
+
     await message.answer("Вы подписаны на утреннюю рассылку! 🎉")
+
+    # Отправляем сегодняшнюю афишу сразу после подписки
+    today = date.today()
+    events = db.get_events_for_date(today)
+    text = format_events_for_date(events, today)
+    await message.answer(text)
 
 @dp.message(F.text == "⏹️ Стоп")
 async def unsubscribe(message: Message):
@@ -92,8 +126,8 @@ async def button_month(message: Message):
 async def cmd_today(message: Message):
     today = date.today()
     events = db.get_events_for_date(today)
-    text = format_events_for_date(events, today, "сегодня")
-    await message.answer(text, parse_mode=ParseMode.HTML)
+    text = format_events_for_date(events, today)
+    await message.answer(text)
 
 @dp.message(Command("week"))
 async def cmd_week(message: Message):
@@ -101,7 +135,7 @@ async def cmd_week(message: Message):
     end_of_week = today + timedelta(days=6)
     events = db.get_events_for_week(today, end_of_week)
     text = format_events_for_week(events, today, end_of_week, period="неделю")
-    await message.answer(text, parse_mode=ParseMode.HTML)
+    await message.answer(text)
 
 @dp.message(Command("month"))
 async def cmd_month(message: Message):
@@ -109,7 +143,39 @@ async def cmd_month(message: Message):
     end_of_month = today + timedelta(days=30)
     events = db.get_events_for_week(today, end_of_month)
     text = format_events_for_week(events, today, end_of_month, period="месяц")
+    await message.answer(text)
+
+# ---------- Команда /stats ----------
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Эта команда только для администратора.")
+        return
+
+    total, recent = db.get_user_stats()
+
+    text = f"📊 <b>Статистика подписчиков</b>\n\n"
+    text += f"Всего активных: <b>{total}</b>\n\n"
+    if recent:
+        text += "<b>Последние 10 подписчиков:</b>\n"
+        for uid, uname, created in recent:
+            username = f"@{uname}" if uname else "нет юзернейма"
+            date_part = created[:10] if created else "неизвестно"
+            text += f"• {username} (ID: {uid}) — {date_part}\n"
+    else:
+        text += "Пока нет подписчиков."
+
     await message.answer(text, parse_mode=ParseMode.HTML)
+
+# ---------- Команда /clear (только для админа) ----------
+@dp.message(Command("clear"))
+async def cmd_clear(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        await message.answer("Эта команда только для администратора.")
+        return
+
+    db.clear_events()
+    await message.answer("✅ Все события удалены из базы данных.")
 
 # ---------- Загрузка Excel (только для админа) ----------
 @dp.message(F.document)
@@ -164,20 +230,21 @@ async def handle_document(message: Message):
             os.remove("temp_events.xlsx")
 
 # ---------- Форматирование сообщений ----------
-def format_events_for_date(events, target_date, label):
+def format_events_for_date(events, target_date):
     if not events:
-        return f"На {label} мероприятий не запланировано."
+        return f"На сегодня (<b>{target_date.strftime('%d.%m.%Y')}</b>) мероприятий не запланировано."
 
-    lines = [f"<b>Афиша на {label} ({target_date.strftime('%d.%m.%Y')}):</b>\n"]
+    lines = [f"📅 <b>Афиша на сегодня ({target_date.strftime('%d.%m.%Y')}):</b>\n"]
     for ev in events:
         start, end, ts, te, title, loc, desc = ev
         start_dt = datetime.strptime(start, '%Y-%m-%d').date()
         end_dt = datetime.strptime(end, '%Y-%m-%d').date()
 
         if start_dt != end_dt:
-            date_str = f"{start_dt.strftime('%d.%m')}–{end_dt.strftime('%d.%m')}"
+            # Многодневное событие
+            date_str = f"{format_date_with_weekday(start_dt)} – {format_date_with_weekday(end_dt)}"
         else:
-            date_str = start_dt.strftime('%d.%m')
+            date_str = format_date_with_weekday(start_dt)
 
         time_str = ""
         if ts and te:
@@ -191,6 +258,7 @@ def format_events_for_date(events, target_date, label):
         if desc:
             line += f"\n  <i>{desc}</i>"
         lines.append(line)
+        lines.append("")  # пустая строка для отступа
 
     return "\n".join(lines)
 
@@ -198,16 +266,16 @@ def format_events_for_week(events, start_date, end_date, period="неделю"):
     if not events:
         return f"На ближайшую {period} (с {start_date.strftime('%d.%m')} по {end_date.strftime('%d.%m')}) мероприятий не запланировано."
 
-    lines = [f"<b>Планы на {period} с {start_date.strftime('%d.%m')} по {end_date.strftime('%d.%m')}:</b>\n"]
+    lines = [f"📅 <b>Планы на {period} с {start_date.strftime('%d.%m')} по {end_date.strftime('%d.%m')}:</b>\n"]
     for ev in events:
         start, end, ts, te, title, loc, desc = ev
         start_dt = datetime.strptime(start, '%Y-%m-%d').date()
         end_dt = datetime.strptime(end, '%Y-%m-%d').date()
 
         if start_dt != end_dt:
-            date_str = f"{start_dt.strftime('%d.%m')}–{end_dt.strftime('%d.%m')}"
+            date_str = f"{format_date_with_weekday(start_dt)} – {format_date_with_weekday(end_dt)}"
         else:
-            date_str = start_dt.strftime('%d.%m')
+            date_str = format_date_with_weekday(start_dt)
 
         time_str = ""
         if ts and te:
@@ -221,6 +289,7 @@ def format_events_for_week(events, start_date, end_date, period="неделю"):
         if desc:
             line += f"\n  <i>{desc}</i>"
         lines.append(line)
+        lines.append("")
 
     return "\n".join(lines)
 
@@ -230,7 +299,7 @@ scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 async def daily_mailing():
     today = date.today()
     today_events = db.get_events_for_date(today)
-    today_text = format_events_for_date(today_events, today, "сегодня")
+    today_text = format_events_for_date(today_events, today)
 
     end_of_week = today + timedelta(days=6)
     week_events = db.get_events_for_week(today, end_of_week)
@@ -239,8 +308,8 @@ async def daily_mailing():
     users = db.get_active_users()
     for user_id in users:
         try:
-            await bot.send_message(user_id, today_text)
-            await bot.send_message(user_id, week_text)
+            await bot.send_message(user_id, today_text, parse_mode=ParseMode.HTML)
+            await bot.send_message(user_id, week_text, parse_mode=ParseMode.HTML)
         except Exception as e:
             logging.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
 
