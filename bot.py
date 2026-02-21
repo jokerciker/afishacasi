@@ -87,6 +87,16 @@ def format_description_with_bold(text: str) -> str:
 
     return '\n'.join(formatted_lines)
 
+def group_events_by_date(events):
+    """Группирует события по дате начала (start_date). Возвращает словарь {date_str: [events]}."""
+    grouped = {}
+    for ev in events:
+        start_date = ev[0]  # 'YYYY-MM-DD'
+        if start_date not in grouped:
+            grouped[start_date] = []
+        grouped[start_date].append(ev)
+    return grouped
+
 # ---------- Клавиатура ----------
 def get_main_keyboard():
     builder = ReplyKeyboardBuilder()
@@ -95,8 +105,8 @@ def get_main_keyboard():
     builder.row()
     builder.add(KeyboardButton(text="📅 Сегодня"))
     builder.add(KeyboardButton(text="📆 Неделя"))
-    builder.add(KeyboardButton(text="📅 Месяц"))
-    builder.adjust(2, 3)
+    # Кнопка "Месяц" удалена
+    builder.adjust(2, 2)  # две строки по две кнопки
     return builder.as_markup(resize_keyboard=True)
 
 # ---------- Команда /start ----------
@@ -135,11 +145,7 @@ async def button_today(message: Message):
 async def button_week(message: Message):
     await cmd_week(message)
 
-@dp.message(F.text == "📅 Месяц")
-async def button_month(message: Message):
-    await cmd_month(message)
-
-# ---------- Команды /today, /week, /month ----------
+# ---------- Команды /today, /week ----------
 @dp.message(Command("today"))
 async def cmd_today(message: Message):
     today = date.today()
@@ -152,16 +158,16 @@ async def cmd_week(message: Message):
     today = date.today()
     end_of_week = today + timedelta(days=6)
     events = db.get_events_for_week(today, end_of_week)
-    text = format_events_for_week(events, today, end_of_week, "неделю")
-    await send_long_message(message.chat.id, text, ParseMode.HTML)
+    if not events:
+        await message.answer(f"На ближайшую неделю (с {today.strftime('%d.%m')} по {end_of_week.strftime('%d.%m')}) мероприятий не запланировано.")
+        return
 
-@dp.message(Command("month"))
-async def cmd_month(message: Message):
-    today = date.today()
-    end_of_month = today + timedelta(days=30)
-    events = db.get_events_for_week(today, end_of_month)
-    text = format_events_for_week(events, today, end_of_month, "месяц")
-    await send_long_message(message.chat.id, text, ParseMode.HTML)
+    grouped = group_events_by_date(events)
+    for day_str in sorted(grouped.keys()):
+        day_events = grouped[day_str]
+        day_date = datetime.strptime(day_str, '%Y-%m-%d').date()
+        day_text = format_events_for_date(day_events, day_date)
+        await send_long_message(message.chat.id, day_text, ParseMode.HTML)
 
 # ---------- Команда /clear ----------
 @dp.message(Command("clear"))
@@ -247,41 +253,9 @@ async def handle_document(message: Message):
 # ---------- Форматирование сообщений ----------
 def format_events_for_date(events, target_date):
     if not events:
-        return f"На сегодня (<b>{target_date.strftime('%d.%m.%Y')}</b>) мероприятий не запланировано."
+        return f"На <b>{target_date.strftime('%d.%m.%Y')}</b> мероприятий не запланировано."
 
-    lines = [f"<b>Афиша на сегодня ({target_date.strftime('%d.%m.%Y')}):</b>\n"]
-    for ev in events:
-        start, end, ts, te, title, loc, desc = ev
-        start_dt = datetime.strptime(start, '%Y-%m-%d').date()
-        end_dt = datetime.strptime(end, '%Y-%m-%d').date()
-
-        if start_dt != end_dt:
-            date_str = f"{format_date_with_weekday(start_dt)} – {format_date_with_weekday(end_dt)}"
-        else:
-            date_str = format_date_with_weekday(start_dt)
-
-        time_str = ""
-        if ts and te:
-            time_str = f" {ts}–{te}"
-        elif ts:
-            time_str = f" {ts}"
-
-        line = f"• {date_str}{time_str} – {title}"
-        if loc:
-            line += f" ({loc})"
-        if desc:
-            formatted_desc = format_description_with_bold(desc)
-            line += f"\n  <i>{formatted_desc}</i>"
-        lines.append(line)
-        lines.append("")
-
-    return "\n".join(lines)
-
-def format_events_for_week(events, start_date, end_date, period="неделю"):
-    if not events:
-        return f"На ближайшую {period} (с <b>{start_date.strftime('%d.%m')}</b> по <b>{end_date.strftime('%d.%m')}</b>) мероприятий не запланировано."
-
-    lines = [f"<b>Планы на {period} с {start_date.strftime('%d.%m')} по {end_date.strftime('%d.%m')}:</b>\n"]
+    lines = [f"<b>Афиша на {target_date.strftime('%d.%m.%Y')}:</b>\n"]
     for ev in events:
         start, end, ts, te, title, loc, desc = ev
         start_dt = datetime.strptime(start, '%Y-%m-%d').date()
@@ -329,18 +303,25 @@ scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
 async def daily_mailing():
     today = date.today()
-    today_events = db.get_events_for_date(today)
-    today_text = format_events_for_date(today_events, today)
-
-    end_of_week = today + timedelta(days=6)
-    week_events = db.get_events_for_week(today, end_of_week)
-    week_text = format_events_for_week(week_events, today, end_of_week, "неделю")
-
     users = db.get_active_users()
     for user_id in users:
         try:
-            await send_long_message(user_id, today_text, ParseMode.HTML)
-            await send_long_message(user_id, week_text, ParseMode.HTML)
+            # Сегодня
+            today_events = db.get_events_for_date(today)
+            today_text = format_events_for_date(today_events, today)
+            if today_text:
+                await send_long_message(user_id, today_text, ParseMode.HTML)
+
+            # Неделя (по дням)
+            end_of_week = today + timedelta(days=6)
+            week_events = db.get_events_for_week(today, end_of_week)
+            if week_events:
+                grouped = group_events_by_date(week_events)
+                for day_str in sorted(grouped.keys()):
+                    day_events = grouped[day_str]
+                    day_date = datetime.strptime(day_str, '%Y-%m-%d').date()
+                    day_text = format_events_for_date(day_events, day_date)
+                    await send_long_message(user_id, day_text, ParseMode.HTML)
         except Exception as e:
             logging.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
 
