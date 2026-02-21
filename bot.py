@@ -26,7 +26,7 @@ from starlette.requests import Request
 import database as db
 
 load_dotenv()
-BOT_TOKEN = os.getenv(8216878976:AAEV4DOPRoKGweVxalmUz4Jki0m8NOWNHhc)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(',')))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 
@@ -362,4 +362,5 @@ app = Starlette(
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
+
     uvicorn.run(app, host="0.0.0.0", port=port)
