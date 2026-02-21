@@ -119,7 +119,7 @@ async def subscribe(message: Message):
     today = date.today()
     events = db.get_events_for_date(today)
     text = format_events_for_date(events, today)
-    await message.answer(text, parse_mode=ParseMode.HTML)
+    await send_long_message(message.chat.id, text, ParseMode.HTML)
 
 @dp.message(F.text == "⏹️ Стоп")
 async def unsubscribe(message: Message):
@@ -145,7 +145,7 @@ async def cmd_today(message: Message):
     today = date.today()
     events = db.get_events_for_date(today)
     text = format_events_for_date(events, today)
-    await message.answer(text, parse_mode=ParseMode.HTML)
+    await send_long_message(message.chat.id, text, ParseMode.HTML)
 
 @dp.message(Command("week"))
 async def cmd_week(message: Message):
@@ -153,7 +153,7 @@ async def cmd_week(message: Message):
     end_of_week = today + timedelta(days=6)
     events = db.get_events_for_week(today, end_of_week)
     text = format_events_for_week(events, today, end_of_week, "неделю")
-    await message.answer(text, parse_mode=ParseMode.HTML)
+    await send_long_message(message.chat.id, text, ParseMode.HTML)
 
 @dp.message(Command("month"))
 async def cmd_month(message: Message):
@@ -161,7 +161,7 @@ async def cmd_month(message: Message):
     end_of_month = today + timedelta(days=30)
     events = db.get_events_for_week(today, end_of_month)
     text = format_events_for_week(events, today, end_of_month, "месяц")
-    await message.answer(text, parse_mode=ParseMode.HTML)
+    await send_long_message(message.chat.id, text, ParseMode.HTML)
 
 # ---------- Команда /clear ----------
 @dp.message(Command("clear"))
@@ -221,8 +221,8 @@ async def handle_document(message: Message):
                 start_date = parse_date(row[idx['start_date']])
                 end_date = parse_date(row[idx['end_date']])
             except Exception as e:
-                await message.answer(f"Ошибка в строке {row[0].row if hasattr(row, 'row') else '?'}: {e}")
-                return
+                await message.answer(f"Ошибка в строке: {e}")
+                continue
 
             time_start = format_time(row[idx.get('time_start')]) if 'time_start' in idx else None
             time_end = format_time(row[idx.get('time_end')]) if 'time_end' in idx else None
@@ -309,6 +309,21 @@ def format_events_for_week(events, start_date, end_date, period="неделю"):
 
     return "\n".join(lines)
 
+# ---------- Функция для отправки длинных сообщений ----------
+async def send_long_message(chat_id: int, text: str, parse_mode: str = None):
+    """Разбивает длинное сообщение на части и отправляет их."""
+    MAX_LENGTH = 4096
+    while len(text) > MAX_LENGTH:
+        # Ищем последний перенос строки в пределах лимита
+        split_at = text.rfind('\n', 0, MAX_LENGTH)
+        if split_at == -1:
+            split_at = MAX_LENGTH
+        part = text[:split_at]
+        text = text[split_at:].lstrip()
+        await bot.send_message(chat_id, part, parse_mode=parse_mode)
+    if text:
+        await bot.send_message(chat_id, text, parse_mode=parse_mode)
+
 # ---------- Планировщик ----------
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
 
@@ -324,8 +339,8 @@ async def daily_mailing():
     users = db.get_active_users()
     for user_id in users:
         try:
-            await bot.send_message(user_id, today_text, parse_mode=ParseMode.HTML)
-            await bot.send_message(user_id, week_text, parse_mode=ParseMode.HTML)
+            await send_long_message(user_id, today_text, ParseMode.HTML)
+            await send_long_message(user_id, week_text, ParseMode.HTML)
         except Exception as e:
             logging.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
 
@@ -362,5 +377,4 @@ app = Starlette(
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-
     uvicorn.run(app, host="0.0.0.0", port=port)
