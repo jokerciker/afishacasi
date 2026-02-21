@@ -1,5 +1,6 @@
 import os
 import logging
+import html
 from datetime import date, timedelta, datetime, time
 from zoneinfo import ZoneInfo
 
@@ -30,7 +31,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(',')))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -61,11 +62,15 @@ def format_time(value):
 def format_description_with_bold(text: str) -> str:
     """
     Форматирует описание:
+    - Экранирует HTML-спецсимволы.
     - Заменяет | на перевод строки.
     - В каждой строке делает жирным текст до первого двоеточия (включая двоеточие).
     """
     if not text:
         return text
+
+    # Экранируем HTML-спецсимволы, чтобы не ломать разметку
+    text = html.escape(text)
 
     text = text.replace('|', '\n')
     lines = text.split('\n')
@@ -105,8 +110,7 @@ def get_main_keyboard():
     builder.row()
     builder.add(KeyboardButton(text="📅 Сегодня"))
     builder.add(KeyboardButton(text="📆 Неделя"))
-    # Кнопка "Месяц" удалена
-    builder.adjust(2, 2)  # две строки по две кнопки
+    builder.adjust(2, 2)
     return builder.as_markup(resize_keyboard=True)
 
 # ---------- Команда /start ----------
@@ -272,9 +276,13 @@ def format_events_for_date(events, target_date):
         elif ts:
             time_str = f" {ts}"
 
-        line = f"• {date_str}{time_str} – {title}"
-        if loc:
-            line += f" ({loc})"
+        # Экранируем title и location
+        title_escaped = html.escape(title)
+        loc_escaped = html.escape(loc) if loc else None
+
+        line = f"• {date_str}{time_str} – {title_escaped}"
+        if loc_escaped:
+            line += f" ({loc_escaped})"
         if desc:
             formatted_desc = format_description_with_bold(desc)
             line += f"\n  <i>{formatted_desc}</i>"
