@@ -1,5 +1,8 @@
 import os
 import logging
+import asyncio
+import html
+import traceback
 from datetime import date, timedelta, datetime, time
 from zoneinfo import ZoneInfo
 
@@ -57,6 +60,38 @@ def format_time(value):
     if isinstance(value, str):
         return value
     return str(value)
+
+def format_description_with_bold(text: str) -> str:
+    """
+    Форматирует описание:
+    - Экранирует HTML-спецсимволы.
+    - Заменяет | на перевод строки.
+    - В каждой строке делает жирным текст до первого двоеточия (включая двоеточие).
+    """
+    if not text:
+        return text
+
+    # Экранируем, чтобы избежать проблем с HTML-тегами
+    text = html.escape(text)
+
+    # Заменяем | на перевод строки
+    text = text.replace('|', '\n')
+
+    lines = text.split('\n')
+    formatted_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            formatted_lines.append('')
+            continue
+        if ':' in line:
+            parts = line.split(':', 1)
+            key = parts[0].strip()
+            value = parts[1].strip()
+            formatted_lines.append(f"<b>{key}:</b> {value}")
+        else:
+            formatted_lines.append(line)
+    return '\n'.join(formatted_lines)
 
 def group_events_by_date(events):
     """Группирует события по дате начала (start_date). Возвращает словарь {date_str: [events]}."""
@@ -166,63 +201,67 @@ async def handle_document(message: Message):
     await bot.download_file(file_path, "temp_events.xlsx")
 
     try:
-        wb = openpyxl.load_workbook("temp_events.xlsx", data_only=True)
-        ws = wb.active
-
-        headers = [cell.value for cell in ws[1]]
-        required = ['start_date', 'end_date', 'title']
-        if not all(col in headers for col in required):
-            await message.answer("Ошибка: файл должен содержать колонки: start_date, end_date, title")
-            return
-
-        idx = {h: headers.index(h) for h in headers if h in required + ['time_start', 'time_end', 'location', 'description']}
-
-        events_list = []
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if all(cell is None for cell in row):
-                continue
-
-            def parse_date(cell):
-                if isinstance(cell, datetime):
-                    return cell.date().isoformat()
-                elif isinstance(cell, str):
-                    try:
-                        return datetime.strptime(cell, '%d.%m.%Y').date().isoformat()
-                    except:
-                        raise ValueError(f"Неверный формат даты: {cell}")
-                else:
-                    raise ValueError(f"Неверный тип даты: {cell}")
-
-            try:
-                start_date = parse_date(row[idx['start_date']])
-                end_date = parse_date(row[idx['end_date']])
-            except Exception as e:
-                await message.answer(f"Ошибка в строке: {e}")
-                continue
-
-            time_start = format_time(row[idx.get('time_start')]) if 'time_start' in idx else None
-            time_end = format_time(row[idx.get('time_end')]) if 'time_end' in idx else None
-            title = row[idx['title']]
-            location = row[idx.get('location')] if 'location' in idx else None
-            description = row[idx.get('description')] if 'description' in idx else None
-
-            # Заменяем | на перевод строки в описании (если есть)
-            if description:
-                description = description.replace('|', '\n')
-
-            events_list.append((start_date, end_date, time_start, time_end, title, location, description))
-
-        wb.close()
-        db.clear_events()
-        db.insert_events(events_list)
-
-        await message.answer(f"Расписание успешно обновлено! Загружено событий: {len(events_list)}")
-
+        # Выносим синхронную обработку в отдельный поток
+        loop = asyncio.get_running_loop()
+        events_list = await loop.run_in_executor(None, process_excel_file, "temp_events.xlsx")
     except Exception as e:
+        logging.error(f"Ошибка при обработке Excel: {e}\n{traceback.format_exc()}")
         await message.answer(f"Произошла ошибка при обработке файла: {e}")
+        return
     finally:
         if os.path.exists("temp_events.xlsx"):
             os.remove("temp_events.xlsx")
+
+    # Сохраняем в базу
+    db.clear_events()
+    db.insert_events(events_list)
+    await message.answer(f"Расписание успешно обновлено! Загружено событий: {len(events_list)}")
+
+def process_excel_file(file_path: str) -> list:
+    """Синхронная функция для чтения Excel и подготовки списка событий."""
+    wb = openpyxl.load_workbook(file_path, data_only=True)
+    ws = wb.active
+
+    headers = [cell.value for cell in ws[1]]
+    required = ['start_date', 'end_date', 'title']
+    if not all(col in headers for col in required):
+        raise ValueError("Ошибка: файл должен содержать колонки: start_date, end_date, title")
+
+    idx = {h: headers.index(h) for h in headers if h in required + ['time_start', 'time_end', 'location', 'description']}
+
+    events_list = []
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if all(cell is None for cell in row):
+            continue
+
+        def parse_date(cell):
+            if isinstance(cell, datetime):
+                return cell.date().isoformat()
+            elif isinstance(cell, str):
+                try:
+                    return datetime.strptime(cell, '%d.%m.%Y').date().isoformat()
+                except:
+                    raise ValueError(f"Неверный формат даты: {cell}")
+            else:
+                raise ValueError(f"Неверный тип даты: {cell}")
+
+        try:
+            start_date = parse_date(row[idx['start_date']])
+            end_date = parse_date(row[idx['end_date']])
+        except Exception as e:
+            logging.warning(f"Пропускаем строку из-за ошибки даты: {e}")
+            continue
+
+        time_start = format_time(row[idx.get('time_start')]) if 'time_start' in idx else None
+        time_end = format_time(row[idx.get('time_end')]) if 'time_end' in idx else None
+        title = row[idx['title']]
+        location = row[idx.get('location')] if 'location' in idx else None
+        description = row[idx.get('description')] if 'description' in idx else None
+
+        events_list.append((start_date, end_date, time_start, time_end, title, location, description))
+
+    wb.close()
+    return events_list
 
 # ---------- Форматирование сообщений ----------
 def format_events_for_date(events, target_date):
@@ -250,7 +289,8 @@ def format_events_for_date(events, target_date):
         if loc:
             line += f" ({loc})"
         if desc:
-            line += f"\n  {desc}"  # без <i>, чтобы избежать проблем с тегами
+            formatted_desc = format_description_with_bold(desc)
+            line += f"\n  <i>{formatted_desc}</i>"
         lines.append(line)
         lines.append("")
 
