@@ -29,6 +29,7 @@ ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(',')))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -68,42 +69,68 @@ def get_main_keyboard():
 # ---------- Команда /start ----------
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer(
-        "Привет! Я бот с афишей мероприятий.\n"
-        "Нажми «▶️ Запуск», чтобы подписаться.\n"
-        "Нажми «⏹️ Стоп», чтобы отписаться.",
-        reply_markup=get_main_keyboard()
-    )
+    logger.info(f"User {message.from_user.id} sent /start")
+    try:
+        await message.answer(
+            "Привет! Я бот с афишей мероприятий.\n"
+            "Нажми «▶️ Запуск», чтобы подписаться.\n"
+            "Нажми «⏹️ Стоп», чтобы отписаться.",
+            reply_markup=get_main_keyboard()
+        )
+        logger.info(f"Start response sent to user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Error in /start: {e}", exc_info=True)
 
 # ---------- Обработка кнопок ----------
 @dp.message(F.text == "▶️ Запуск")
 async def subscribe(message: Message):
-    db.add_user(message.from_user.id, message.from_user.username)
-    await message.answer("Вы подписаны на утреннюю рассылку! 🎉")
+    logger.info(f"User {message.from_user.id} clicked Subscribe")
+    try:
+        db.add_user(message.from_user.id, message.from_user.username)
+        await message.answer("Вы подписаны на утреннюю рассылку! 🎉")
+        logger.info(f"Subscribe OK for user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Error in subscribe: {e}", exc_info=True)
 
 @dp.message(F.text == "⏹️ Стоп")
 async def unsubscribe(message: Message):
-    db.remove_user(message.from_user.id)
-    await message.answer("Вы отписались.")
+    logger.info(f"User {message.from_user.id} clicked Unsubscribe")
+    try:
+        db.remove_user(message.from_user.id)
+        await message.answer("Вы отписались.")
+        logger.info(f"Unsubscribe OK for user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Error in unsubscribe: {e}", exc_info=True)
 
 @dp.message(F.text == "📅 Сегодня")
 async def button_today(message: Message):
-    today = date.today()
-    events = db.get_events_for_date(today)
-    text = format_events(events, today)
-    await message.answer(text, parse_mode=ParseMode.HTML)
+    logger.info(f"User {message.from_user.id} requested today")
+    try:
+        today = date.today()
+        events = db.get_events_for_date(today)
+        text = format_events(events, today)
+        await message.answer(text, parse_mode=ParseMode.HTML)
+        logger.info(f"Today sent to user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Error in today: {e}", exc_info=True)
+        await message.answer("Произошла ошибка при получении событий.")
 
 @dp.message(F.text == "📆 Неделя")
 async def button_week(message: Message):
-    today = date.today()
-    end_of_week = today + timedelta(days=6)
-    events = db.get_events_for_week(today, end_of_week)
-    if not events:
-        await message.answer(f"На неделю нет событий.")
-        return
-    # Отправляем все события одним сообщением (без разбивки)
-    text = format_events_week(events, today, end_of_week)
-    await message.answer(text, parse_mode=ParseMode.HTML)
+    logger.info(f"User {message.from_user.id} requested week")
+    try:
+        today = date.today()
+        end_of_week = today + timedelta(days=6)
+        events = db.get_events_for_week(today, end_of_week)
+        if not events:
+            await message.answer("На неделю нет событий.")
+            return
+        text = format_events_week(events, today, end_of_week)
+        await message.answer(text, parse_mode=ParseMode.HTML)
+        logger.info(f"Week sent to user {message.from_user.id}")
+    except Exception as e:
+        logger.error(f"Error in week: {e}", exc_info=True)
+        await message.answer("Произошла ошибка при получении событий.")
 
 # ---------- Форматирование ----------
 def format_events(events, target_date):
@@ -149,6 +176,7 @@ def format_events_week(events, start_date, end_date):
 # ---------- Загрузка Excel ----------
 @dp.message(F.document)
 async def handle_document(message: Message):
+    logger.info(f"Admin {message.from_user.id} uploaded a file")
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("Нет прав.")
         return
@@ -193,22 +221,30 @@ async def handle_document(message: Message):
         db.clear_events()
         db.insert_events(events)
         await message.answer(f"Загружено {len(events)} событий.")
+        logger.info(f"Excel processed: {len(events)} events")
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
+        logger.error(f"Error processing Excel: {e}", exc_info=True)
         await message.answer("Ошибка при обработке.")
     finally:
         if os.path.exists("temp.xlsx"):
             os.remove("temp.xlsx")
 
+# ---------- Keep-alive задача ----------
+async def keep_alive():
+    while True:
+        await asyncio.sleep(30)
+        logger.info("Keep-alive signal")
+
 # ---------- ВЕБХУКИ ----------
 async def on_startup():
     webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL', '')}/webhook"
     await bot.set_webhook(webhook_url)
-    logging.info(f"Вебхук установлен: {webhook_url}")
+    asyncio.create_task(keep_alive())
+    logger.info(f"Вебхук установлен: {webhook_url}")
 
 async def on_shutdown():
     await bot.delete_webhook()
-    logging.info("Вебхук удалён")
+    logger.info("Вебхук удалён")
 
 async def webhook(request: Request) -> Response:
     update_data = await request.json()
