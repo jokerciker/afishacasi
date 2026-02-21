@@ -1,7 +1,6 @@
 import os
 import logging
 import asyncio
-import html
 from datetime import date, timedelta, datetime, time
 from zoneinfo import ZoneInfo
 
@@ -56,43 +55,11 @@ def format_time(value):
         return value
     return str(value)
 
-def format_description_with_bold(text: str) -> str:
-    """
-    Форматирует описание:
-    - Заменяет | на перевод строки с отступом.
-    - В каждой строке делает жирным текст до первого двоеточия (включая двоеточие).
-    - Экранирует HTML-спецсимволы.
-    """
-    if not text:
-        return text
-
-    # Экранируем
-    text = html.escape(text)
-
-    # Заменяем | на \n  (с двумя пробелами для отступа)
-    text = text.replace('|', '\n  ')
-
-    lines = text.split('\n')
-    formatted_lines = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            formatted_lines.append('')
-            continue
-        if ':' in line:
-            parts = line.split(':', 1)
-            key = parts[0].strip()
-            value = parts[1].strip()
-            formatted_lines.append(f"<b>{key}:</b> {value}")
-        else:
-            formatted_lines.append(line)
-    return '\n'.join(formatted_lines)
-
 def group_events_by_date(events):
-    """Группирует события по дате начала (start_date). Возвращает словарь {date_str: [events]}."""
+    """Группирует события по дате начала."""
     grouped = {}
     for ev in events:
-        start_date = ev[0]  # 'YYYY-MM-DD'
+        start_date = ev[0]
         if start_date not in grouped:
             grouped[start_date] = []
         grouped[start_date].append(ev)
@@ -169,7 +136,6 @@ async def button_week(message: Message):
             await message.answer("На неделю нет событий.")
             return
 
-        # Группируем по дням и отправляем каждый день отдельно
         grouped = group_events_by_date(events)
         for day_str in sorted(grouped.keys()):
             day_events = grouped[day_str]
@@ -182,7 +148,7 @@ async def button_week(message: Message):
         logger.error(f"Error in week: {e}", exc_info=True)
         await message.answer("Произошла ошибка при получении событий.")
 
-# ---------- Форматирование (с жирными ключами и абзацами) ----------
+# ---------- Форматирование (только жирные даты и абзацы через |) ----------
 def format_events(events, target_date):
     if not events:
         return f"На <b>{target_date.strftime('%d.%m.%Y')}</b> нет событий."
@@ -203,8 +169,9 @@ def format_events(events, target_date):
         if loc:
             line += f" ({loc})"
         if desc:
-            formatted_desc = format_description_with_bold(desc)
-            line += f"\n  <i>{formatted_desc}</i>"
+            # Простая замена | на перевод строки
+            desc = desc.replace('|', '\n  ')
+            line += f"\n  {desc}"
         lines.append(line)
         lines.append("")  # пустая строка между событиями
 
@@ -238,7 +205,6 @@ async def handle_document(message: Message):
     await bot.download_file(file.file_path, "temp.xlsx")
 
     try:
-        # Читаем Excel в фоновом потоке
         events = await asyncio.to_thread(process_excel, "temp.xlsx")
         db.clear_events()
         db.insert_events(events)
@@ -252,7 +218,6 @@ async def handle_document(message: Message):
             os.remove("temp.xlsx")
 
 def process_excel(file_path: str) -> list:
-    """Синхронная функция для чтения Excel (вызывается в потоке)."""
     wb = openpyxl.load_workbook(file_path, data_only=True)
     ws = wb.active
 
@@ -314,7 +279,7 @@ async def ensure_webhook():
                 logger.critical("Could not set webhook after several attempts")
                 return False
 
-# ---------- Фоновая задача для поддержания активности и проверки вебхука ----------
+# ---------- Фоновая задача ----------
 async def keep_alive_and_check_webhook():
     while True:
         await asyncio.sleep(60)
