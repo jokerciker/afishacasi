@@ -229,22 +229,49 @@ async def handle_document(message: Message):
         if os.path.exists("temp.xlsx"):
             os.remove("temp.xlsx")
 
-# ---------- Keep-alive задача ----------
-async def keep_alive():
+# ---------- Функция проверки и установки вебхука ----------
+async def ensure_webhook():
+    webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL', '')}/webhook"
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        try:
+            current = await bot.get_webhook_info()
+            if current.url == webhook_url:
+                logger.info(f"Webhook already set correctly: {webhook_url}")
+                return True
+            logger.info(f"Setting webhook to {webhook_url}, attempt {attempt}")
+            await bot.set_webhook(webhook_url)
+            logger.info("Webhook set successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set webhook (attempt {attempt}): {e}")
+            if attempt < max_attempts:
+                await asyncio.sleep(2 ** attempt)  # exponential backoff
+            else:
+                logger.critical("Could not set webhook after several attempts")
+                return False
+
+# ---------- Фоновая задача для поддержания активности и проверки вебхука ----------
+async def keep_alive_and_check_webhook():
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(60)
         logger.info("Keep-alive signal")
+        await ensure_webhook()
 
 # ---------- ВЕБХУКИ ----------
 async def on_startup():
-    webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL', '')}/webhook"
-    await bot.set_webhook(webhook_url)
-    asyncio.create_task(keep_alive())
-    logger.info(f"Вебхук установлен: {webhook_url}")
+    logger.info("Starting up...")
+    await ensure_webhook()
+    asyncio.create_task(keep_alive_and_check_webhook())
+    logger.info("Startup complete")
 
 async def on_shutdown():
-    await bot.delete_webhook()
-    logger.info("Вебхук удалён")
+    logger.info("Shutting down, deleting webhook...")
+    try:
+        await bot.delete_webhook()
+        logger.info("Webhook deleted")
+    except Exception as e:
+        logger.error(f"Error deleting webhook: {e}")
 
 async def webhook(request: Request) -> Response:
     update_data = await request.json()
