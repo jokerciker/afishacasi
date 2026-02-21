@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import html
 from datetime import date, timedelta, datetime, time
 from zoneinfo import ZoneInfo
 
@@ -54,6 +55,48 @@ def format_time(value):
     if isinstance(value, str):
         return value
     return str(value)
+
+def format_description_with_bold(text: str) -> str:
+    """
+    Форматирует описание:
+    - Заменяет | на перевод строки с отступом.
+    - В каждой строке делает жирным текст до первого двоеточия (включая двоеточие).
+    - Экранирует HTML-спецсимволы.
+    """
+    if not text:
+        return text
+
+    # Экранируем
+    text = html.escape(text)
+
+    # Заменяем | на \n  (с двумя пробелами для отступа)
+    text = text.replace('|', '\n  ')
+
+    lines = text.split('\n')
+    formatted_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            formatted_lines.append('')
+            continue
+        if ':' in line:
+            parts = line.split(':', 1)
+            key = parts[0].strip()
+            value = parts[1].strip()
+            formatted_lines.append(f"<b>{key}:</b> {value}")
+        else:
+            formatted_lines.append(line)
+    return '\n'.join(formatted_lines)
+
+def group_events_by_date(events):
+    """Группирует события по дате начала (start_date). Возвращает словарь {date_str: [events]}."""
+    grouped = {}
+    for ev in events:
+        start_date = ev[0]  # 'YYYY-MM-DD'
+        if start_date not in grouped:
+            grouped[start_date] = []
+        grouped[start_date].append(ev)
+    return grouped
 
 # ---------- Клавиатура ----------
 def get_main_keyboard():
@@ -109,7 +152,7 @@ async def button_today(message: Message):
         today = date.today()
         events = db.get_events_for_date(today)
         text = format_events(events, today)
-        await message.answer(text, parse_mode=ParseMode.HTML)
+        await send_long_message(message.chat.id, text, ParseMode.HTML)
         logger.info(f"Today sent to user {message.from_user.id}")
     except Exception as e:
         logger.error(f"Error in today: {e}", exc_info=True)
@@ -125,55 +168,62 @@ async def button_week(message: Message):
         if not events:
             await message.answer("На неделю нет событий.")
             return
-        text = format_events_week(events, today, end_of_week)
-        await message.answer(text, parse_mode=ParseMode.HTML)
+
+        # Группируем по дням и отправляем каждый день отдельно
+        grouped = group_events_by_date(events)
+        for day_str in sorted(grouped.keys()):
+            day_events = grouped[day_str]
+            day_date = datetime.strptime(day_str, '%Y-%m-%d').date()
+            day_text = format_events(day_events, day_date)
+            await send_long_message(message.chat.id, day_text, ParseMode.HTML)
+
         logger.info(f"Week sent to user {message.from_user.id}")
     except Exception as e:
         logger.error(f"Error in week: {e}", exc_info=True)
         await message.answer("Произошла ошибка при получении событий.")
 
-# ---------- Форматирование ----------
+# ---------- Форматирование (с жирными ключами и абзацами) ----------
 def format_events(events, target_date):
     if not events:
         return f"На <b>{target_date.strftime('%d.%m.%Y')}</b> нет событий."
+
     lines = [f"<b>Афиша на {target_date.strftime('%d.%m.%Y')}:</b>\n"]
     for ev in events:
         start, end, ts, te, title, loc, desc = ev
         start_dt = datetime.strptime(start, '%Y-%m-%d').date()
         end_dt = datetime.strptime(end, '%Y-%m-%d').date()
+
         if start_dt != end_dt:
             date_str = f"{format_date_with_weekday(start_dt)} – {format_date_with_weekday(end_dt)}"
         else:
             date_str = format_date_with_weekday(start_dt)
+
         time_str = f" {ts}–{te}" if ts and te else f" {ts}" if ts else ""
         line = f"• {date_str}{time_str} – {title}"
         if loc:
             line += f" ({loc})"
         if desc:
-            line += f"\n  {desc}"
+            formatted_desc = format_description_with_bold(desc)
+            line += f"\n  <i>{formatted_desc}</i>"
         lines.append(line)
+        lines.append("")  # пустая строка между событиями
+
     return "\n".join(lines)
 
-def format_events_week(events, start_date, end_date):
-    lines = [f"<b>События с {start_date.strftime('%d.%m')} по {end_date.strftime('%d.%m')}:</b>\n"]
-    for ev in events:
-        start, end, ts, te, title, loc, desc = ev
-        start_dt = datetime.strptime(start, '%Y-%m-%d').date()
-        end_dt = datetime.strptime(end, '%Y-%m-%d').date()
-        if start_dt != end_dt:
-            date_str = f"{format_date_with_weekday(start_dt)} – {format_date_with_weekday(end_dt)}"
-        else:
-            date_str = format_date_with_weekday(start_dt)
-        time_str = f" {ts}–{te}" if ts and te else f" {ts}" if ts else ""
-        line = f"• {date_str}{time_str} – {title}"
-        if loc:
-            line += f" ({loc})"
-        if desc:
-            line += f"\n  {desc}"
-        lines.append(line)
-    return "\n".join(lines)
+# ---------- Функция для отправки длинных сообщений ----------
+async def send_long_message(chat_id: int, text: str, parse_mode: str = None):
+    MAX_LENGTH = 4096
+    while len(text) > MAX_LENGTH:
+        split_at = text.rfind('\n', 0, MAX_LENGTH)
+        if split_at == -1:
+            split_at = MAX_LENGTH
+        part = text[:split_at]
+        text = text[split_at:].lstrip()
+        await bot.send_message(chat_id, part, parse_mode=parse_mode)
+    if text:
+        await bot.send_message(chat_id, text, parse_mode=parse_mode)
 
-# ---------- Загрузка Excel ----------
+# ---------- Загрузка Excel (оптимизированная) ----------
 @dp.message(F.document)
 async def handle_document(message: Message):
     logger.info(f"Admin {message.from_user.id} uploaded a file")
@@ -188,36 +238,8 @@ async def handle_document(message: Message):
     await bot.download_file(file.file_path, "temp.xlsx")
 
     try:
-        wb = openpyxl.load_workbook("temp.xlsx", data_only=True)
-        ws = wb.active
-        headers = [cell.value for cell in ws[1]]
-        required = ['start_date', 'end_date', 'title']
-        if not all(col in headers for col in required):
-            await message.answer("Нет нужных колонок.")
-            return
-        idx = {h: headers.index(h) for h in headers if h in required + ['time_start', 'time_end', 'location', 'description']}
-        events = []
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            if all(c is None for c in row):
-                continue
-            def parse_date(cell):
-                if isinstance(cell, datetime):
-                    return cell.date().isoformat()
-                try:
-                    return datetime.strptime(cell, '%d.%m.%Y').date().isoformat()
-                except:
-                    return None
-            sd = parse_date(row[idx['start_date']])
-            ed = parse_date(row[idx['end_date']])
-            if not sd or not ed:
-                continue
-            ts = format_time(row[idx.get('time_start')]) if 'time_start' in idx else None
-            te = format_time(row[idx.get('time_end')]) if 'time_end' in idx else None
-            title = row[idx['title']]
-            loc = row[idx.get('location')] if 'location' in idx else None
-            desc = row[idx.get('description')] if 'description' in idx else None
-            events.append((sd, ed, ts, te, title, loc, desc))
-        wb.close()
+        # Читаем Excel в фоновом потоке
+        events = await asyncio.to_thread(process_excel, "temp.xlsx")
         db.clear_events()
         db.insert_events(events)
         await message.answer(f"Загружено {len(events)} событий.")
@@ -228,6 +250,47 @@ async def handle_document(message: Message):
     finally:
         if os.path.exists("temp.xlsx"):
             os.remove("temp.xlsx")
+
+def process_excel(file_path: str) -> list:
+    """Синхронная функция для чтения Excel (вызывается в потоке)."""
+    wb = openpyxl.load_workbook(file_path, data_only=True)
+    ws = wb.active
+
+    headers = [cell.value for cell in ws[1]]
+    required = ['start_date', 'end_date', 'title']
+    if not all(col in headers for col in required):
+        raise ValueError("Нет нужных колонок")
+
+    idx = {h: headers.index(h) for h in headers if h in required + ['time_start', 'time_end', 'location', 'description']}
+    events = []
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if all(c is None for c in row):
+            continue
+
+        def parse_date(cell):
+            if isinstance(cell, datetime):
+                return cell.date().isoformat()
+            try:
+                return datetime.strptime(cell, '%d.%m.%Y').date().isoformat()
+            except:
+                return None
+
+        sd = parse_date(row[idx['start_date']])
+        ed = parse_date(row[idx['end_date']])
+        if not sd or not ed:
+            continue
+
+        ts = format_time(row[idx.get('time_start')]) if 'time_start' in idx else None
+        te = format_time(row[idx.get('time_end')]) if 'time_end' in idx else None
+        title = row[idx['title']]
+        loc = row[idx.get('location')] if 'location' in idx else None
+        desc = row[idx.get('description')] if 'description' in idx else None
+
+        events.append((sd, ed, ts, te, title, loc, desc))
+
+    wb.close()
+    return events
 
 # ---------- Функция проверки и установки вебхука ----------
 async def ensure_webhook():
@@ -246,7 +309,7 @@ async def ensure_webhook():
         except Exception as e:
             logger.error(f"Failed to set webhook (attempt {attempt}): {e}")
             if attempt < max_attempts:
-                await asyncio.sleep(2 ** attempt)  # exponential backoff
+                await asyncio.sleep(2 ** attempt)
             else:
                 logger.critical("Could not set webhook after several attempts")
                 return False
