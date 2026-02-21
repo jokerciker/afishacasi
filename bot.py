@@ -1,6 +1,5 @@
 import os
 import logging
-import html
 from datetime import date, timedelta, datetime, time
 from zoneinfo import ZoneInfo
 
@@ -58,39 +57,6 @@ def format_time(value):
     if isinstance(value, str):
         return value
     return str(value)
-
-def format_description_with_bold(text: str) -> str:
-    """
-    Форматирует описание:
-    - Экранирует HTML-спецсимволы.
-    - Заменяет | на перевод строки.
-    - В каждой строке делает жирным текст до первого двоеточия (включая двоеточие).
-    """
-    if not text:
-        return text
-
-    # Экранируем HTML-спецсимволы, чтобы не ломать разметку
-    text = html.escape(text)
-
-    text = text.replace('|', '\n')
-    lines = text.split('\n')
-    formatted_lines = []
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            formatted_lines.append('')
-            continue
-
-        if ':' in line:
-            parts = line.split(':', 1)
-            key = parts[0].strip()
-            value = parts[1].strip()
-            formatted_lines.append(f"<b>{key}:</b> {value}")
-        else:
-            formatted_lines.append(line)
-
-    return '\n'.join(formatted_lines)
 
 def group_events_by_date(events):
     """Группирует события по дате начала (start_date). Возвращает словарь {date_str: [events]}."""
@@ -240,6 +206,10 @@ async def handle_document(message: Message):
             location = row[idx.get('location')] if 'location' in idx else None
             description = row[idx.get('description')] if 'description' in idx else None
 
+            # Заменяем | на перевод строки в описании (если есть)
+            if description:
+                description = description.replace('|', '\n')
+
             events_list.append((start_date, end_date, time_start, time_end, title, location, description))
 
         wb.close()
@@ -276,16 +246,11 @@ def format_events_for_date(events, target_date):
         elif ts:
             time_str = f" {ts}"
 
-        # Экранируем title и location
-        title_escaped = html.escape(title)
-        loc_escaped = html.escape(loc) if loc else None
-
-        line = f"• {date_str}{time_str} – {title_escaped}"
-        if loc_escaped:
-            line += f" ({loc_escaped})"
+        line = f"• {date_str}{time_str} – {title}"
+        if loc:
+            line += f" ({loc})"
         if desc:
-            formatted_desc = format_description_with_bold(desc)
-            line += f"\n  <i>{formatted_desc}</i>"
+            line += f"\n  {desc}"  # без <i>, чтобы избежать проблем с тегами
         lines.append(line)
         lines.append("")
 
@@ -296,7 +261,6 @@ async def send_long_message(chat_id: int, text: str, parse_mode: str = None):
     """Разбивает длинное сообщение на части и отправляет их."""
     MAX_LENGTH = 4096
     while len(text) > MAX_LENGTH:
-        # Ищем последний перенос строки в пределах лимита
         split_at = text.rfind('\n', 0, MAX_LENGTH)
         if split_at == -1:
             split_at = MAX_LENGTH
@@ -335,7 +299,7 @@ async def daily_mailing():
 
 scheduler.add_job(daily_mailing, CronTrigger(hour=7, minute=0, timezone=TIMEZONE))
 
-# ---------- ВЕБХУКИ (для Render) ----------
+# ---------- ВЕБХУКИ ----------
 async def on_startup():
     webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL', '')}/webhook"
     await bot.set_webhook(webhook_url)
