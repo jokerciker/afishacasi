@@ -14,6 +14,10 @@ from aiogram.enums import ParseMode
 import openpyxl
 from dotenv import load_dotenv
 
+# Для планировщика
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 # Для вебхуков
 import uvicorn
 from starlette.applications import Starlette
@@ -83,7 +87,7 @@ async def cmd_start(message: Message):
     try:
         await message.answer(
             "Привет! Я бот с афишей мероприятий.\n"
-            "Нажми «▶️ Запуск», чтобы подписаться.\n"
+            "Нажми «▶️ Запуск», чтобы подписаться на ежедневную рассылку.\n"
             "Нажми «⏹️ Стоп», чтобы отписаться.",
             reply_markup=get_main_keyboard()
         )
@@ -91,13 +95,13 @@ async def cmd_start(message: Message):
     except Exception as e:
         logger.error(f"Error in /start: {e}", exc_info=True)
 
-# ---------- Обработка кнопок ----------
+# ---------- Обработка кнопок подписки ----------
 @dp.message(F.text == "▶️ Запуск")
 async def subscribe(message: Message):
     logger.info(f"User {message.from_user.id} clicked Subscribe")
     try:
         db.add_user(message.from_user.id, message.from_user.username)
-        await message.answer("Вы подписаны на утреннюю рассылку! 🎉")
+        await message.answer("Вы подписаны на утреннюю рассылку! 🎉\nКаждый день в 7:00 я буду присылать афишу на сегодня.")
         logger.info(f"Subscribe OK for user {message.from_user.id}")
     except Exception as e:
         logger.error(f"Error in subscribe: {e}", exc_info=True)
@@ -107,11 +111,12 @@ async def unsubscribe(message: Message):
     logger.info(f"User {message.from_user.id} clicked Unsubscribe")
     try:
         db.remove_user(message.from_user.id)
-        await message.answer("Вы отписались.")
+        await message.answer("Вы отписались от рассылки. Чтобы вернуться, нажмите «▶️ Запуск».")
         logger.info(f"Unsubscribe OK for user {message.from_user.id}")
     except Exception as e:
         logger.error(f"Error in unsubscribe: {e}", exc_info=True)
 
+# ---------- Команды для ручного запроса ----------
 @dp.message(F.text == "📅 Сегодня")
 async def button_today(message: Message):
     logger.info(f"User {message.from_user.id} requested today")
@@ -148,7 +153,7 @@ async def button_week(message: Message):
         logger.error(f"Error in week: {e}", exc_info=True)
         await message.answer("Произошла ошибка при получении событий.")
 
-# ---------- Форматирование (только жирные даты и абзацы через |) ----------
+# ---------- Форматирование сообщений (только жирные даты и абзацы через |) ----------
 def format_events(events, target_date):
     if not events:
         return f"На <b>{target_date.strftime('%d.%m.%Y')}</b> нет событий."
@@ -177,7 +182,7 @@ def format_events(events, target_date):
 
     return "\n".join(lines)
 
-# ---------- Функция для отправки длинных сообщений ----------
+# ---------- Отправка длинных сообщений ----------
 async def send_long_message(chat_id: int, text: str, parse_mode: str = None):
     MAX_LENGTH = 4096
     while len(text) > MAX_LENGTH:
@@ -257,6 +262,27 @@ def process_excel(file_path: str) -> list:
     wb.close()
     return events
 
+# ---------- Планировщик ежедневной рассылки ----------
+scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+
+async def daily_mailing():
+    logger.info("Starting daily mailing...")
+    today = date.today()
+    users = db.get_active_users()
+    if not users:
+        logger.info("No active users for mailing.")
+        return
+    for user_id in users:
+        try:
+            events = db.get_events_for_date(today)
+            text = format_events(events, today)
+            await send_long_message(user_id, text, ParseMode.HTML)
+            logger.info(f"Sent daily update to user {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to send to user {user_id}: {e}")
+
+scheduler.add_job(daily_mailing, CronTrigger(hour=7, minute=0, timezone=TIMEZONE))
+
 # ---------- Функция проверки и установки вебхука ----------
 async def ensure_webhook():
     webhook_url = f"{os.environ.get('RENDER_EXTERNAL_URL', '')}/webhook"
@@ -279,17 +305,18 @@ async def ensure_webhook():
                 logger.critical("Could not set webhook after several attempts")
                 return False
 
-# ---------- Фоновая задача ----------
+# ---------- Фоновая задача для поддержания активности и проверки вебхука ----------
 async def keep_alive_and_check_webhook():
     while True:
         await asyncio.sleep(60)
         logger.info("Keep-alive signal")
         await ensure_webhook()
 
-# ---------- ВЕБХУКИ ----------
+# ---------- Вебхуки ----------
 async def on_startup():
     logger.info("Starting up...")
     await ensure_webhook()
+    scheduler.start()
     asyncio.create_task(keep_alive_and_check_webhook())
     logger.info("Startup complete")
 
